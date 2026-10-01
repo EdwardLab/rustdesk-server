@@ -31,9 +31,11 @@ Existing sessions are not moved between relays.
 1. Deploy `hbbr` in each region with the same authentication public key as
    the main server, and allow its TCP port (normally 21117, and 21119 for
    WebSocket clients). Do not publish the private signing key.
-2. Obtain a real GeoLite2 City or GeoIP2 City `.mmdb` database from MaxMind
-   under its license. Keep it updated. The repository's test fixture is
-   synthetic and unsuitable for deployment.
+2. Use the free [MaxMind GeoLite2 City database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/).
+   Create a free MaxMind account and download `GeoLite2-City.mmdb` in MMDB
+   format. Country and ASN databases do not provide the required coordinates.
+   Follow the database license and update requirements. The repository's
+   test fixture is synthetic and unsuitable for deployment.
 3. Create `relay-locations.json`, specifying each relay's actual data-center
    coordinates as `[latitude, longitude]`. Names must exactly match the
    entries passed to `hbbs -r`, including ports. For example:
