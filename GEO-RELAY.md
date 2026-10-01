@@ -99,6 +99,16 @@ cargo build --locked --bins
 cargo test --locked --lib
 ```
 
+CI also builds and tests a static x86_64 musl `hbbs` for Alpine containers.
+Download the `rustdesk-geo-hbbs-linux-musl` artifact from a successful
+`Geo relay checks` run. For an existing server-s6 deployment, mount that
+binary over `/usr/bin/hbbs`, mount the GeoIP directory, and set `RELAY`,
+`GEOIP_DB`, and `RELAY_LOCATIONS` in Compose. Recreate the container after
+replacing the binary. Keep the original Compose file and databases backed up.
+The API's advertised fixed relay must also be empty; configure the API YAML
+file as well as its environment override, because empty environment values
+can fall back to file values.
+
 See `tests/geo-relay-smoke.py` for a local multi-process routing and health
 check. It uses synthetic test data and temporary relay ports. It does not
 change an installed RustDesk client or a deployed server.
