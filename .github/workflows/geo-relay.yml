@@ -20,9 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev libssl-dev pkg-config musl-tools
       - name: Check routing source format
         run: rustfmt --edition 2021 --check src/geo_relay.rs src/rendezvous_server.rs
       - name: Test
@@ -39,4 +40,20 @@ jobs:
             target/debug/hbbs
             target/debug/hbbr
             target/debug/rustdesk-utils
+          if-no-files-found: error
+      - name: Build static hbbs for Alpine deployments
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl --bin hbbs
+      - name: Exercise static hbbs
+        run: |
+          mkdir -p target/static-smoke
+          cp target/x86_64-unknown-linux-musl/release/hbbs target/static-smoke/hbbs
+          cp target/debug/hbbr target/static-smoke/hbbr
+          RUSTDESK_TEST_BIN="$PWD/target/static-smoke" python3 tests/geo-relay-smoke.py
+      - name: Upload static hbbs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-geo-hbbs-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/hbbs
           if-no-files-found: error
