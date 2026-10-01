@@ -1,4 +1,5 @@
 use crate::common::*;
+use crate::geo_relay::GeoRelay;
 use crate::peer::*;
 use hbb_common::bytes::BufMut;
 use hbb_common::{
@@ -53,6 +54,7 @@ use std::{
 enum Data {
     Msg(Box<RendezvousMessage>, SocketAddr),
     RelayServers0(String),
+    ReloadGeo,
     RelayServers(Arc<RelayServers>, RelayServers),
 }
 
@@ -124,6 +126,7 @@ pub struct RendezvousServer {
     tx: Sender,
     relay_servers: Arc<RelayServers>,
     relay_servers0: Arc<RelayServers>,
+    geo_relay: Option<Arc<GeoRelay>>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
     ws_map: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
@@ -174,6 +177,7 @@ impl RendezvousServer {
             tx: tx.clone(),
             relay_servers: Default::default(),
             relay_servers0: Default::default(),
+            geo_relay: GeoRelay::from_config()?.map(Arc::new),
             rendezvous_servers: Arc::new(rendezvous_servers),
             inner: Arc::new(Inner {
                 serial,
@@ -190,7 +194,7 @@ impl RendezvousServer {
         log::info!("mask: {:?}", rs.inner.mask);
         log::info!("local-ip: {:?}", rs.inner.local_ip);
         std::env::set_var("PORT_FOR_API", port.to_string());
-        rs.parse_relay_servers(&get_arg("relay-servers"));
+        rs.parse_relay_servers(&get_arg("relay-servers"))?;
         let mut listener = create_tcp_listener(port).await?;
         let mut listener2 = create_tcp_listener(nat_port).await?;
         let mut listener3 = create_tcp_listener(ws_port).await?;
@@ -317,7 +321,16 @@ impl RendezvousServer {
                 Some(data) = rx.recv() => {
                     match data {
                         Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
-                        Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
+                        Data::RelayServers0(rs) => {
+                            if let Err(err) = self.parse_relay_servers(&rs) {
+                                log::error!("Relay configuration rejected: {err:#}");
+                            }
+                        }
+                        Data::ReloadGeo => {
+                            if let Err(err) = self.reload_geo() {
+                                log::error!("Geographic routing reload rejected: {err:#}");
+                            }
+                        }
                         Data::RelayServers(source, rs) => {
                             if Arc::ptr_eq(&source, &self.relay_servers0) {
                                 self.relay_servers = Arc::new(rs);
@@ -1116,17 +1129,37 @@ impl RendezvousServer {
         true
     }
 
-    fn parse_relay_servers(&mut self, relay_servers: &str) {
+    fn parse_relay_servers(&mut self, relay_servers: &str) -> ResultType<()> {
         let rs = get_servers(relay_servers, "relay-servers");
+        if let Some(geo) = &self.geo_relay {
+            geo.validate_relays(&rs)?;
+        }
         self.relay_servers0 = Arc::new(rs);
         self.relay_servers = Arc::new(Vec::new());
+        Ok(())
     }
 
-    fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
+    fn reload_geo(&mut self) -> ResultType<()> {
+        let geo = GeoRelay::from_config()?;
+        if let Some(geo) = &geo {
+            geo.validate_relays(&self.relay_servers0)?;
+        }
+        self.geo_relay = geo.map(Arc::new);
+        log::info!("Geographic relay routing reloaded");
+        Ok(())
+    }
+
+    fn get_relay_server(&self, pa: IpAddr, pb: IpAddr) -> String {
         if self.relay_servers.is_empty() {
             return "".to_owned();
         } else if self.relay_servers.len() == 1 {
             return self.relay_servers[0].clone();
+        }
+        if let Some(geo) = &self.geo_relay {
+            if let Some(host) = geo.select(&self.relay_servers, pa, pb) {
+                log::debug!("Selected geographic relay {host}");
+                return host.to_owned();
+            }
         }
         let i = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst) % self.relay_servers.len();
         self.relay_servers[i].clone()
@@ -1260,6 +1293,10 @@ impl RendezvousServer {
                         ALWAYS_USE_RELAY.load(Ordering::SeqCst)
                     );
                 }
+            }
+            Some("reload-geo" | "rg") => {
+                self.tx.send(Data::ReloadGeo).ok();
+                res = "Geo reload requested; check hbbs logs for the result".to_owned();
             }
             Some("test-geo" | "tg") => {
                 if let Some(rs) = fds.next() {

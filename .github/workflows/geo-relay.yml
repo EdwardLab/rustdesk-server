@@ -1,0 +1,42 @@
+name: Geo relay checks
+
+on:
+  push:
+    branches: [geo-relay]
+  pull_request:
+    branches: [geo-relay]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev libssl-dev pkg-config
+      - name: Check routing source format
+        run: rustfmt --edition 2021 --check src/geo_relay.rs src/rendezvous_server.rs
+      - name: Test
+        run: cargo test --locked --lib
+      - name: Build
+        run: cargo build --locked --bins
+      - name: Exercise live server processes
+        run: python3 tests/geo-relay-smoke.py
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-geo-relay-linux-amd64
+          path: |
+            target/debug/hbbs
+            target/debug/hbbr
+            target/debug/rustdesk-utils
+          if-no-files-found: error

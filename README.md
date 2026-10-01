@@ -1,3 +1,11 @@
+# Geographic relay routing fork
+
+This fork selects an online relay using both peers' geographic locations,
+with existing RustDesk clients. See [GEO-RELAY.md](GEO-RELAY.md) for setup,
+tests, and the upstream update workflow. Changes are on `geo-relay`; the
+original upstream branch is preserved as `forapi`. The upstream Docker
+images listed below do not contain this feature.
+
 
 # 关于此分支
 
