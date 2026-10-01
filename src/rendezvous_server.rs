@@ -53,7 +53,7 @@ use std::{
 enum Data {
     Msg(Box<RendezvousMessage>, SocketAddr),
     RelayServers0(String),
-    RelayServers(RelayServers),
+    RelayServers(Arc<RelayServers>, RelayServers),
 }
 
 const REG_TIMEOUT: i32 = 30_000;
@@ -306,7 +306,7 @@ impl RendezvousServer {
         loop {
             tokio::select! {
                 _ = timer_check_relay.tick() => {
-                    if self.relay_servers0.len() > 1 {
+                    if !self.relay_servers0.is_empty() {
                         let rs = self.relay_servers0.clone();
                         let tx = self.tx.clone();
                         tokio::spawn(async move {
@@ -318,7 +318,11 @@ impl RendezvousServer {
                     match data {
                         Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
                         Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
-                        Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
+                        Data::RelayServers(source, rs) => {
+                            if Arc::ptr_eq(&source, &self.relay_servers0) {
+                                self.relay_servers = Arc::new(rs);
+                            }
+                        }
                     }
                 }
                 res = socket.next() => {
@@ -1115,7 +1119,7 @@ impl RendezvousServer {
     fn parse_relay_servers(&mut self, relay_servers: &str) {
         let rs = get_servers(relay_servers, "relay-servers");
         self.relay_servers0 = Arc::new(rs);
-        self.relay_servers = self.relay_servers0.clone();
+        self.relay_servers = Arc::new(Vec::new());
     }
 
     fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
@@ -1504,29 +1508,55 @@ impl RendezvousServer {
 }
 
 async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
-    let mut futs = Vec::new();
-    let rs = Arc::new(Mutex::new(Vec::new()));
-    for x in rs0.iter() {
-        let mut host = x.to_owned();
-        if !host.contains(':') {
-            host = format!("{}:{}", host, config::RELAY_PORT);
-        }
-        let rs = rs.clone();
-        let x = x.clone();
-        futs.push(tokio::spawn(async move {
-            if FramedStream::new(&host, None, CHECK_RELAY_TIMEOUT)
-                .await
-                .is_ok()
-            {
-                rs.lock().await.push(x);
-            }
-        }));
-    }
-    join_all(futs).await;
+    let probes = rs0.iter().map(|host| async move {
+        let address = if host.starts_with('[') && host.ends_with(']') || !host.contains(':') {
+            format!("{}:{}", host, config::RELAY_PORT)
+        } else {
+            host.clone()
+        };
+        FramedStream::new(&address, None, CHECK_RELAY_TIMEOUT)
+            .await
+            .ok()
+            .map(|_| host.clone())
+    });
+    let rs = join_all(probes).await.into_iter().flatten().collect();
     log::debug!("check_relay_servers");
-    let rs = std::mem::take(&mut *rs.lock().await);
-    if !rs.is_empty() {
-        tx.send(Data::RelayServers(rs)).ok();
+    tx.send(Data::RelayServers(rs0, rs)).ok();
+}
+
+#[cfg(test)]
+mod relay_health_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_checks_remove_offline_relays_and_preserve_configuration_order() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hosts = Arc::new(vec![
+            first.local_addr().unwrap().to_string(),
+            second.local_addr().unwrap().to_string(),
+        ]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        check_relay_servers(hosts.clone(), tx.clone()).await;
+        match rx.recv().await.unwrap() {
+            Data::RelayServers(source, online) => {
+                assert!(Arc::ptr_eq(&source, &hosts));
+                assert_eq!(online, *hosts);
+            }
+            _ => panic!("Expected relay health result"),
+        }
+        drop(first);
+        check_relay_servers(hosts.clone(), tx.clone()).await;
+        match rx.recv().await.unwrap() {
+            Data::RelayServers(_, online) => assert_eq!(online, vec![hosts[1].clone()]),
+            _ => panic!("Expected relay health result"),
+        }
+        drop(second);
+        check_relay_servers(hosts, tx).await;
+        match rx.recv().await.unwrap() {
+            Data::RelayServers(_, online) => assert!(online.is_empty()),
+            _ => panic!("Expected relay health result"),
+        }
     }
 }
 
